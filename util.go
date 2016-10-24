@@ -9,8 +9,9 @@ import (
 	"strings"
 
 	"github.com/immesys/bw2/objects"
+	"github.com/immesys/bw2/util"
+	bw2 "github.com/immesys/bw2bind"
 	"github.com/pkg/errors"
-	bw2 "gopkg.in/immesys/bw2bind.v5"
 )
 
 func fmtHash(hash []byte) string {
@@ -58,6 +59,7 @@ func (c *Client) MultiSubscribe(uri string) (chan *bw2.SimpleMessage, error) {
 	if err != nil {
 		return nil, errors.Wrap(err, "Could not resolve namespace")
 	}
+
 	// build all of the chains we can use to subscribe
 	dchains, err := c.FindDOTChains(nsvk)
 	if err != nil {
@@ -67,13 +69,13 @@ func (c *Client) MultiSubscribe(uri string) (chan *bw2.SimpleMessage, error) {
 	demuxed := make(chan *bw2.SimpleMessage, 10)
 
 	for _, dchain := range dchains {
-		// shadow it
-		dchain := dchain
-		go func() {
+		// first form the actual subscription URI
+		subURI := GetDChainURI(dchain, uri)
+		go func(uri string, dchain *objects.DChain) {
 			c, err := c.Subscribe(&bw2.SubscribeParams{
-				URI:            uri,
+				URI:            subURI,
 				AutoChain:      false,
-				RoutingObjects: bw2.DChainContentsToROList(dchain.GetRONum(), dchain.GetContent()),
+				RoutingObjects: []objects.RoutingObject{dchain},
 				ElaboratePAC:   bw2.ElaboratePartial,
 			})
 			if err != nil {
@@ -84,20 +86,22 @@ func (c *Client) MultiSubscribe(uri string) (chan *bw2.SimpleMessage, error) {
 				demuxed <- msg
 			}
 
-		}()
-		c, err := c.Query(&bw2.QueryParams{
-			URI:            uri,
-			AutoChain:      false,
-			RoutingObjects: bw2.DChainContentsToROList(dchain.GetRONum(), dchain.GetContent()),
-			ElaboratePAC:   bw2.ElaboratePartial,
-		})
-		if err != nil {
-			fmt.Println(err)
-			continue
-		}
-		for msg := range c {
-			demuxed <- msg
-		}
+		}(subURI, dchain)
+		go func(uri string, dchain *objects.DChain) {
+			c, err := c.Query(&bw2.QueryParams{
+				URI:            subURI,
+				AutoChain:      false,
+				RoutingObjects: []objects.RoutingObject{dchain},
+				ElaboratePAC:   bw2.ElaboratePartial,
+			})
+			if err != nil {
+				fmt.Println(err)
+				return
+			}
+			for msg := range c {
+				demuxed <- msg
+			}
+		}(subURI, dchain)
 	}
 
 	return demuxed, nil
@@ -137,19 +141,22 @@ func (c *Client) FindDOTChains(namespace string) ([]*objects.DChain, error) {
 	var (
 		dchains []*objects.DChain
 	)
+	// get the list of lists of DOTs
 	dotlists, err := c.findDOTChains(namespace, c.vk, namespace)
 	if err != nil {
 		return nil, err
 	}
+	// for every list, collapse it into a DChain object
 	for _, chain := range dotlists {
-		fmt.Println("DOT START")
-		for _, dot := range chain {
-			fmt.Printf("  DOT: %s %s\n", dot.GetAccessURISuffix(), dot.GetPermString())
-		}
 		dchain, err := objects.CreateDChain(true, chain...)
 		if err != nil {
 			return nil, err
 		}
+		// skip the dchain if it is invalid or isn't an access chain
+		if !dchain.IsAccess() || !dchain.CheckAllSigs() {
+			continue
+		}
+
 		dchains = append(dchains, dchain)
 	}
 	return dchains, err
@@ -192,4 +199,29 @@ func (c *Client) findDOTChains(fromvk, findvk, namespace string) ([][]*objects.D
 		}
 	}
 	return chains, nil
+}
+
+// given a dchain and a URI, return the broadest URI you can actually
+// subscribe to using the dchain. Assumes the DChain is elaborated (i.e. it has
+// all of its DOTs populated)
+func GetDChainURI(dchain *objects.DChain, uri string) string {
+	subURI := GetURISuffix(uri)
+	ns := strings.Split(uri, "/")[0]
+	// collapse the DOT to get the actual subscription URI
+	for i := 0; i < dchain.NumHashes(); i++ {
+		dot := dchain.GetDOT(i)
+		newURI, overlap := util.RestrictBy(dot.GetAccessURISuffix(), subURI)
+		// if it don't overlap, don't use it
+		if !overlap {
+			return ""
+		}
+		subURI = newURI
+	}
+
+	return ns + "/" + subURI
+}
+
+// Returns the URI that's not the namespace
+func GetURISuffix(uri string) string {
+	return strings.Join(strings.Split(uri, "/")[1:], "/")
 }
