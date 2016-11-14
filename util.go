@@ -5,12 +5,15 @@ package bw2util
 import (
 	"encoding/base64"
 	"fmt"
+	"log"
 	"reflect"
 	"strings"
+	"time"
 
 	"github.com/immesys/bw2/objects"
 	"github.com/immesys/bw2/util"
 	bw2 "github.com/immesys/bw2bind"
+	"github.com/karlseguin/ccache"
 	"github.com/pkg/errors"
 )
 
@@ -21,14 +24,16 @@ func fmtHash(hash []byte) string {
 // Wrapper for bw2 client that provides additional functionality
 type Client struct {
 	*bw2.BW2Client
-	vk string
+	dupCache *ccache.Cache
+	vk       string
 }
 
 func NewClient(client *bw2.BW2Client, vk string) (*Client, error) {
 	if len(vk) == 0 {
 		return nil, fmt.Errorf("VK cannot be empty")
 	}
-	return &Client{client, vk}, nil
+	cache := ccache.New(ccache.Configure().MaxSize(10000))
+	return &Client{client, cache, vk}, nil
 }
 
 // Given a URI, returns the base64 encoding of the namespace VK that is the base of the URI
@@ -47,6 +52,20 @@ func (c *Client) GetNamespaceVK(uri string) (string, error) {
 	return nsvk, nil
 }
 
+// returns true if we haven't seen this message before; this will double check
+// the message cache
+func (c *Client) messageIsNew(msg *bw2.SimpleMessage) bool {
+	if msg.Signature == nil || len(msg.Signature) == 0 {
+		log.Fatal("You need to upgrade your bw2 agent to >= 2.5.4 (curl get.bw2.io/agent | sh)")
+	}
+	// use the signature of the message
+	if exists := c.dupCache.Get(string(msg.Signature)); exists == nil {
+		c.dupCache.Set(string(msg.Signature), struct{}{}, 2*time.Minute)
+		return true
+	}
+	return false
+}
+
 //TODO: get the overlap of all found dchains
 
 // I want to subscribe to some broad pattern (e.g. scatch.ns/*/!meta/giles), but my access is distributed over
@@ -61,18 +80,39 @@ func (c *Client) MultiSubscribe(uri string) (chan *bw2.SimpleMessage, error) {
 	}
 
 	// build all of the chains we can use to subscribe
-	dchains, err := c.FindDOTChains(nsvk)
+	_dchains, err := c.FindDOTChains(nsvk)
 	if err != nil {
 		return nil, errors.Wrap(err, "Could not find DOT chains")
 	}
 
 	demuxed := make(chan *bw2.SimpleMessage, 10)
 
-	for _, dchain := range dchains {
+	// get the set of unique URIs for dchains so we can see if they overlap
+	var uris []string
+	var dchains []*objects.DChain
+	for _, dchain := range _dchains {
+		// check that the dchain has a valid URI and that its TTL isn't expired
+		if suburi := GetDChainURI(dchain, uri); len(suburi) > 0 && dchain.GetTTL() >= 0 {
+			var found = false
+			for _, u := range uris {
+				if u == suburi {
+					found = true
+					break
+				}
+			}
+			if !found {
+				uris = append(uris, suburi)
+				dchains = append(dchains, dchain)
+			}
+		}
+	}
+
+	for i, dchain := range dchains {
 		// first form the actual subscription URI
-		subURI := GetDChainURI(dchain, uri)
+		subURI := uris[i]
+		fmt.Println("Subscribe to", subURI)
 		go func(uri string, dchain *objects.DChain) {
-			c, err := c.Subscribe(&bw2.SubscribeParams{
+			cc, err := c.Subscribe(&bw2.SubscribeParams{
 				URI:            subURI,
 				AutoChain:      false,
 				RoutingObjects: []objects.RoutingObject{dchain},
@@ -82,13 +122,14 @@ func (c *Client) MultiSubscribe(uri string) (chan *bw2.SimpleMessage, error) {
 				fmt.Println(err)
 				return
 			}
-			for msg := range c {
-				demuxed <- msg
+			for msg := range cc {
+				if c.messageIsNew(msg) {
+					demuxed <- msg
+				}
 			}
-
 		}(subURI, dchain)
 		go func(uri string, dchain *objects.DChain) {
-			c, err := c.Query(&bw2.QueryParams{
+			cc, err := c.Query(&bw2.QueryParams{
 				URI:            subURI,
 				AutoChain:      false,
 				RoutingObjects: []objects.RoutingObject{dchain},
@@ -98,8 +139,10 @@ func (c *Client) MultiSubscribe(uri string) (chan *bw2.SimpleMessage, error) {
 				fmt.Println(err)
 				return
 			}
-			for msg := range c {
-				demuxed <- msg
+			for msg := range cc {
+				if c.messageIsNew(msg) {
+					demuxed <- msg
+				}
 			}
 		}(subURI, dchain)
 	}
@@ -215,6 +258,7 @@ func GetDChainURI(dchain *objects.DChain, uri string) string {
 		if !overlap {
 			return ""
 		}
+		//fmt.Println("=>=>=>", dot.GetAccessURISuffix(), subURI)
 		subURI = newURI
 	}
 
