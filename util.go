@@ -182,10 +182,11 @@ func (c *Client) findDOTsFromVK(fromvk string) ([]*objects.DOT, error) {
 
 func (c *Client) FindDOTChains(namespace string) ([]*objects.DChain, error) {
 	var (
-		dchains []*objects.DChain
+		dchains    []*objects.DChain
+		visitedVKs = make(map[string]struct{})
 	)
 	// get the list of lists of DOTs
-	dotlists, err := c.findDOTChains(namespace, c.vk, namespace)
+	dotlists, err := c.findDOTChains(namespace, c.vk, namespace, visitedVKs)
 	if err != nil {
 		return nil, err
 	}
@@ -206,10 +207,16 @@ func (c *Client) FindDOTChains(namespace string) ([]*objects.DChain, error) {
 }
 
 // find/build lists of DOTs between the two VKs on the given namespace
-func (c *Client) findDOTChains(fromvk, findvk, namespace string) ([][]*objects.DOT, error) {
+func (c *Client) findDOTChains(fromvk, findvk, namespace string, visitedVKs map[string]struct{}) ([][]*objects.DOT, error) {
 	var (
 		chains [][]*objects.DOT
 	)
+	if _, found := visitedVKs[fromvk]; found {
+		// skip if we've already found
+		return chains, nil
+	}
+	// mark as visited
+	visitedVKs[fromvk] = struct{}{}
 	dots, err := c.findDOTsFromVK(fromvk)
 	if err != nil {
 		return chains, errors.Wrap(err, "Could not find DOTS from vk")
@@ -233,7 +240,7 @@ func (c *Client) findDOTChains(fromvk, findvk, namespace string) ([][]*objects.D
 		}
 
 		// otherwise, we continue our search
-		recursive_chains, err := c.findDOTChains(recvVK, findvk, namespace)
+		recursive_chains, err := c.findDOTChains(recvVK, findvk, namespace, visitedVKs)
 		if err != nil {
 			return chains, err
 		}
