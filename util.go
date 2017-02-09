@@ -211,11 +211,7 @@ func (c *Client) findDOTChains(fromvk, findvk, namespace string, visitedVKs map[
 	var (
 		chains [][]*objects.DOT
 	)
-	if _, found := visitedVKs[fromvk]; found {
-		// skip if we've already found
-		return chains, nil
-	}
-	// mark as visited
+	// mark start point as visited
 	visitedVKs[fromvk] = struct{}{}
 	dots, err := c.findDOTsFromVK(fromvk)
 	if err != nil {
@@ -228,19 +224,27 @@ func (c *Client) findDOTChains(fromvk, findvk, namespace string, visitedVKs map[
 		if mvk != namespace {
 			continue
 		}
+		recvVK := fmtHash(dot.GetReceiverVK())
+		if _, found := visitedVKs[recvVK]; found {
+			continue
+		}
 		// add dot to the current chain
 		our_chain = append(our_chain, dot)
 
 		// check if the DOT is granted to our VK. If it is, we terminate this branch of
 		// the search
-		recvVK := fmtHash(dot.GetReceiverVK())
 		if recvVK == findvk {
 			chains = append(chains, our_chain)
 			continue
 		}
 
 		// otherwise, we continue our search
-		recursive_chains, err := c.findDOTChains(recvVK, findvk, namespace, visitedVKs)
+		// copy the map
+		newvisited := make(map[string]struct{})
+		for k, v := range visitedVKs {
+			newvisited[k] = v
+		}
+		recursive_chains, err := c.findDOTChains(recvVK, findvk, namespace, newvisited)
 		if err != nil {
 			return chains, err
 		}
@@ -265,7 +269,6 @@ func GetDChainURI(dchain *objects.DChain, uri string) string {
 		if !overlap {
 			return ""
 		}
-		//fmt.Println("=>=>=>", dot.GetAccessURISuffix(), subURI)
 		subURI = newURI
 	}
 
