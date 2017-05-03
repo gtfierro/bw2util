@@ -17,6 +17,8 @@ import (
 	"github.com/pkg/errors"
 )
 
+const EVERYBODYVK = "----EqP__WY477nofMYUz2MNFBsfa5IK_RBlRvKptDY="
+
 func fmtHash(hash []byte) string {
 	return base64.URLEncoding.EncodeToString(hash)
 }
@@ -233,7 +235,7 @@ func (c *Client) findDOTChains(fromvk, findvk, namespace string, visitedVKs map[
 
 		// check if the DOT is granted to our VK. If it is, we terminate this branch of
 		// the search
-		if recvVK == findvk {
+		if recvVK == findvk || recvVK == EVERYBODYVK {
 			chains = append(chains, our_chain)
 			continue
 		}
